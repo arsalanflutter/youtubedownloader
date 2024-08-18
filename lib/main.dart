@@ -1,5 +1,6 @@
+import 'dart:convert';
+import 'package:http/http.dart' as http;
 import 'package:flutter/material.dart';
-import 'package:youtube_explode_dart/youtube_explode_dart.dart';
 import 'package:permission_handler/permission_handler.dart';
 import 'dart:io';
 import 'dart:io' as io;
@@ -46,52 +47,44 @@ class _MyHomePageState extends State<MyHomePage> {
   String _status = '';
   final FlutterFFmpeg _flutterFFmpeg = FlutterFFmpeg();
 
-  Future<void> _downloadVideo(String url) async {
-    setState(() {
-      _isLoading = true;
-      _status = 'Downloading...';
-    });
+ 
 
-    try {
-      var yt = YoutubeExplode();
-      var videoId = VideoId(url);
-      var video = await yt.videos.get(videoId);
-      var title = video.title;
+Future<void> _downloadVideo(String url) async {
+  setState(() {
+    _isLoading = true;
+    _status = 'Downloading...';
+  });
+
+  try {
+    // Request video info from the server
+    var response = await http.post(
+      Uri.parse('http://your-server-url/getVideoInfo'),
+      headers: {"Content-Type": "application/json"},
+      body: jsonEncode({"url": url}),
+    );
+
+    if (response.statusCode == 200) {
+      var data = jsonDecode(response.body);
+
+      var title = data['title'];
       var sanitizedTitle = _sanitizeFileName(title);
-
-      var manifest = await yt.videos.streamsClient.getManifest(videoId);
 
       var directory = io.Directory('/storage/emulated/0/Download/');
       if (!await directory.exists()) {
         await directory.create(recursive: true);
       }
 
-      // Select quality
-      var selectedStreamInfo = await _showQualityDialog(manifest);
+      // Show quality dialog to the user
+      var selectedStreamInfo = await _showQualityDialog(data['streams']);
 
       if (selectedStreamInfo != null) {
-        // Download video and audio separately
-        var videoStream = yt.videos.streamsClient.get(selectedStreamInfo);
-        var audioStreamInfo = manifest.audio.withHighestBitrate();
-        var audioStream = yt.videos.streamsClient.get(audioStreamInfo);
-
+        // Download the selected video and audio from the server
         var videoFilePath = '${directory.path}/${sanitizedTitle}_video.mp4';
         var audioFilePath = '${directory.path}/${sanitizedTitle}_audio.mp4';
         var mergedFilePath = '${directory.path}/${sanitizedTitle}.mp4';
 
-        // Save video file
-        var videoFile = File(videoFilePath);
-        var videoFileStream = videoFile.openWrite();
-        await videoStream.pipe(videoFileStream);
-        await videoFileStream.flush();
-        await videoFileStream.close();
-
-        // Save audio file
-        var audioFile = File(audioFilePath);
-        var audioFileStream = audioFile.openWrite();
-        await audioStream.pipe(audioFileStream);
-        await audioFileStream.flush();
-        await audioFileStream.close();
+        await _downloadFile(data['streams'][selectedStreamInfo]['videoUrl'], videoFilePath);
+        await _downloadFile(data['streams'][selectedStreamInfo]['audioUrl'], audioFilePath);
 
         // Merge video and audio using FFmpeg
         await _mergeVideoAndAudio(videoFilePath, audioFilePath, mergedFilePath);
@@ -105,47 +98,61 @@ class _MyHomePageState extends State<MyHomePage> {
         await _scanFile(mergedFilePath);
 
         // Clean up
-        videoFile.deleteSync();
-        audioFile.deleteSync();
+        File(videoFilePath).deleteSync();
+        File(audioFilePath).deleteSync();
       } else {
         setState(() {
           _isLoading = false;
           _status = 'Download cancelled';
         });
       }
-
-      yt.close();
-    } catch (e) {
+    } else {
       setState(() {
         _isLoading = false;
-        _status = 'Error: $e';
+        _status = 'Server Error: ${response.statusCode}';
       });
     }
+  } catch (e) {
+    setState(() {
+      _isLoading = false;
+      _status = 'Error: $e';
+    });
   }
+}
 
-  Future<StreamInfo?> _showQualityDialog(StreamManifest manifest) async {
-    return showDialog<StreamInfo>(
-      context: context,
-      builder: (BuildContext context) {
-        return AlertDialog(
-          title: Text('Select Quality'),
-          content: SingleChildScrollView(
-            child: ListBody(
-              children: manifest.video.map((streamInfo) {
-                return ListTile(
-                  title: Text(
-                      '${streamInfo.videoQualityLabel} (${streamInfo.size.totalMegaBytes.toStringAsFixed(2)} MB)'),
-                  onTap: () {
-                    Navigator.of(context).pop(streamInfo);
-                  },
-                );
-              }).toList(),
-            ),
+Future<void> _downloadFile(String url, String filePath) async {
+  var response = await http.get(Uri.parse(url));
+  var file = File(filePath);
+  await file.writeAsBytes(response.bodyBytes);
+}
+
+
+  Future<int?> _showQualityDialog(List<dynamic> streams) async {
+  return showDialog<int>(
+    context: context,
+    builder: (BuildContext context) {
+      return AlertDialog(
+        title: Text('Select Quality'),
+        content: SingleChildScrollView(
+          child: ListBody(
+            children: List.generate(streams.length, (index) {
+              var stream = streams[index];
+              return ListTile(
+                title: Text(
+                    '${stream['qualityLabel']} (${stream['size']} MB)'),
+                onTap: () {
+                  Navigator.of(context).pop(index);
+                },
+              );
+            }),
           ),
-        );
-      },
-    );
-  }
+        ),
+      );
+    },
+  );
+}
+
+
 
   Future<void> _mergeVideoAndAudio(
       String videoPath, String audioPath, String outputPath) async {
